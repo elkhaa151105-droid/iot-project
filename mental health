@@ -1,0 +1,169 @@
+#include <ESP8266WiFi.h>
+#include <WiFiClientSecure.h>
+#include <UniversalTelegramBot.h>
+
+#include <Wire.h>
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include "MAX30105.h"
+#include "heartRate.h"
+
+// ================= WIFI =================
+const char* ssid = "NAMA_WIFI";
+const char* password = "PASSWORD_WIFI";
+
+#define BOT_TOKEN "TOKEN_KAMU"
+#define CHAT_ID "CHAT_ID_KAMU"
+
+WiFiClientSecure client;
+UniversalTelegramBot bot(BOT_TOKEN, client);
+
+// ================= PIN =================
+#define ONE_WIRE_BUS D5
+#define BUZZER D6
+#define RED D7
+#define GREEN D8
+#define BLUE D0
+
+// ================= SENSOR =================
+Adafruit_MPU6050 mpu;
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature tempSensor(&oneWire);
+MAX30105 particleSensor;
+
+// ================= OLED =================
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+
+// ================= VAR =================
+long lastBeat = 0;
+float heartRate = 0;
+bool mpu_ok = false;
+bool max_ok = false;
+
+unsigned long lastSend = 0;
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  Wire.begin(D2, D1); // SDA, SCL
+
+  pinMode(BUZZER, OUTPUT);
+  pinMode(RED, OUTPUT);
+  pinMode(GREEN, OUTPUT);
+  pinMode(BLUE, OUTPUT);
+
+  // ===== WIFI =====
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting");
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("\nConnected!");
+  client.setInsecure();
+
+  // ===== MPU =====
+  if (mpu.begin()) mpu_ok = true;
+
+  // ===== TEMP =====
+  tempSensor.begin();
+
+  // ===== MAX30102 =====
+  if (particleSensor.begin(Wire, I2C_SPEED_FAST)) {
+    max_ok = true;
+    particleSensor.setup();
+    particleSensor.setPulseAmplitudeRed(0x0A);
+    particleSensor.setPulseAmplitudeGreen(0);
+  }
+
+  // ===== OLED =====
+  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+  display.setTextColor(SSD1306_WHITE);
+
+  bot.sendMessage(CHAT_ID, "🚀 ESP8266 Aktif!", "");
+}
+
+void loop() {
+
+  // ===== HEART RATE =====
+  if (max_ok) {
+    long irValue = particleSensor.getIR();
+
+    if (checkForBeat(irValue)) {
+      long delta = millis() - lastBeat;
+      lastBeat = millis();
+      heartRate = 60 / (delta / 1000.0);
+    }
+  }
+
+  // ===== SUHU =====
+  tempSensor.requestTemperatures();
+  float suhu = tempSensor.getTempCByIndex(0);
+
+  // ===== MPU =====
+  float accel = 0;
+
+  if (mpu_ok) {
+    sensors_event_t a, g, temp;
+    mpu.getEvent(&a, &g, &temp);
+
+    accel = sqrt(
+      a.acceleration.x * a.acceleration.x +
+      a.acceleration.y * a.acceleration.y +
+      a.acceleration.z * a.acceleration.z
+    );
+  }
+
+  // ===== LOGIKA =====
+  String status;
+
+  if (heartRate > 100 && accel > 15) {
+    status = "STRES";
+    digitalWrite(RED, HIGH);
+    digitalWrite(GREEN, LOW);
+    digitalWrite(BLUE, LOW);
+    digitalWrite(BUZZER, HIGH);
+  } 
+  else if (heartRate > 85) {
+    status = "WASPADA";
+  } 
+  else {
+    status = "NORMAL";
+  }
+
+  // ===== OLED =====
+  display.clearDisplay();
+  display.setCursor(0, 0);
+
+  display.println("ESP8266 Version");
+  display.println("----------------");
+  display.print("HR: "); display.println(heartRate);
+  display.print("Temp: "); display.println(suhu);
+  display.print("Move: "); display.println(accel);
+  display.print("Status: "); display.println(status);
+
+  display.display();
+
+  // ===== TELEGRAM =====
+  if (millis() - lastSend > 10000) {
+    String msg = "📊 ESP8266\n";
+    msg += "HR: " + String(heartRate) + "\n";
+    msg += "Temp: " + String(suhu) + "\n";
+    msg += "Move: " + String(accel) + "\n";
+    msg += "Status: " + status;
+
+    bot.sendMessage(CHAT_ID, msg, "");
+    lastSend = millis();
+  }
+
+  delay(200);
+}
